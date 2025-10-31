@@ -270,6 +270,13 @@ export const AdaptiveCardModelView = joint.dia.ElementView.extend({
   }
 });
 
+
+// src/graph/adaptive-card.js
+export const shapesNS = { app: {} };
+
+shapesNS.app.AdaptiveCardModel = AdaptiveCardModel;
+shapesNS.app.AdaptiveCardModelView = AdaptiveCardModelView;
+
 /* register by name + ensure namespace used by Paper */
-joint.shapes.app = joint.shapes.app || {};
-joint.shapes.app.AdaptiveCardModelView = AdaptiveCardModelView;
+/*joint.shapes.app = joint.shapes.app || {};
+joint.shapes.app.AdaptiveCardModelView = AdaptiveCardModelView;*/

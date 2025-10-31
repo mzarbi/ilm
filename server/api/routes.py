@@ -5,6 +5,7 @@ import os
 import time
 from pathlib import Path
 from urllib.parse import urlparse
+from datetime import date, datetime, timedelta
 
 from flask import Blueprint, request, jsonify, current_app, send_file
 from werkzeug.utils import secure_filename
@@ -612,3 +613,654 @@ def focus_bundle():
             "edges": edges,
         }
         return jsonify(payload), 200
+
+@api_bp.post("/analysis/concentration/shared-dependencies")
+def analysis_concentration_shared_dependencies():
+    """
+    POST JSON:
+      {
+        "pov_kind": "project" | "entity" | "interlinkage",
+        "pov_id":   <int>,
+        "group_by": "identifier" | "type" | "id_type" | "type_level",   # default: "identifier"
+        "min_cluster": <int>=2,
+        "levels": ["low","medium","high","critical"],                   # optional filter
+        "measure": "none" | "ead" | "rwa" | "mtm" | "pnl",              # default: "none"
+        "exposures_mode": "latest" | "none"                             # default: "latest"
+      }
+
+    Response:
+      {
+        "scope": { "pov_kind": "...", "pov_id": ..., "interlinkage_ids": [...] },
+        "params": { ...echoed... },
+        "clusters": [
+          {
+            "key":         "<group key>",
+            "label":       "<same as key or pretty label>",
+            "by":          "identifier|type|id_type|type_level",
+            "il_count":    <int>,     # distinct interlinkages in this cluster
+            "dep_count":   <int>,     # interdependence rows in this cluster
+            "levels":      ["high","low",...],      # distinct levels present
+            "types":       ["technical","contractual", ...],
+            "interlinkages": [
+              {
+                "id": <int>,
+                "project_id": <int|null>,
+                "sponsor_id": <int|null>,
+                "sponsor_name": <str|null>,          # ENRICHED
+                "counterparty_id": <int|null>,
+                "counterparty_name": <str|null>,     # ENRICHED
+                "notional_amount": <str|null>,
+                "currency_id": <int|null>,
+                "currency_code": <str|null>,         # ENRICHED (e.g., "EUR")
+                "measure": <str|null>                # latest EAD/RWA/MTM/PNL if requested
+              },
+              ...
+            ]
+          },
+          ...
+        ],
+        "overlay": {
+          "nodes": [
+            { "kind": "cluster", "id": "cluster:<key>", "label": "<label>", "size_hint": <int>, "il_count": <int> }
+          ],
+          "links": [
+            { "from": "il:<id>", "to": "cluster:<key>", "label": "shared-dependency" }
+          ]
+        }
+      }
+    """
+    body = request.get_json(force=True, silent=False) or {}
+
+    pov_kind      = (body.get("pov_kind") or "").strip().lower()
+    pov_id        = body.get("pov_id")
+    group_by      = (body.get("group_by") or "identifier").strip().lower()
+    min_cluster   = int(body.get("min_cluster") or 2)
+    levels_flt    = body.get("levels") or []
+    measure       = (body.get("measure") or "none").strip().lower()
+    exposures_mode= (body.get("exposures_mode") or "latest").strip().lower()
+
+    if pov_kind not in ("project", "entity", "interlinkage") or not isinstance(pov_id, int):
+        return jsonify({"error": "invalid_args",
+                        "hint": "pov_kind ∈ {project, entity, interlinkage} and pov_id must be int"}), 400
+    if group_by not in ("identifier", "type", "id_type", "type_level"):
+        return jsonify({"error": "invalid_group_by"}), 400
+    if measure not in ("none", "ead", "rwa", "mtm", "pnl"):
+        return jsonify({"error": "invalid_measure"}), 400
+    if exposures_mode not in ("latest", "none"):
+        return jsonify({"error": "invalid_exposures_mode"}), 400
+    if min_cluster < 2:
+        min_cluster = 2
+
+    def not_deleted(q, Model):
+        return q.filter(getattr(Model, "is_deleted", False) == False) if hasattr(Model, "is_deleted") else q  # noqa: E712
+
+    with session_scope() as s:
+        # ------------------ Scope: which Interlinkage IDs are in play ------------------
+        if pov_kind == "project":
+            q = not_deleted(s.query(m.Interlinkage.id).filter(m.Interlinkage.project_id == pov_id), m.Interlinkage)
+            il_ids = {row[0] for row in q.all()}
+        elif pov_kind == "entity":
+            q = not_deleted(
+                s.query(m.Interlinkage.id).filter(
+                    or_(
+                        m.Interlinkage.sponsor_id == pov_id,
+                        m.Interlinkage.counterparty_id == pov_id,
+                        m.Interlinkage.booking_entity_id == pov_id
+                    )
+                ),
+                m.Interlinkage
+            )
+            il_ids = {row[0] for row in q.all()}
+        else:  # interlinkage
+            row = not_deleted(s.query(m.Interlinkage.id).filter(m.Interlinkage.id == pov_id), m.Interlinkage).first()
+            if not row:
+                return jsonify({"error": "not_found", "entity": "interlinkage"}), 404
+            il_ids = {pov_id}
+
+        if not il_ids:
+            return jsonify({
+                "scope":   {"pov_kind": pov_kind, "pov_id": pov_id, "interlinkage_ids": []},
+                "params":  {"group_by": group_by, "min_cluster": min_cluster, "levels": levels_flt,
+                            "measure": measure, "exposures_mode": exposures_mode},
+                "clusters": [],
+                "overlay": {"nodes": [], "links": []}
+            }), 200
+
+        # ------------------ Load Interdependences in scope (+ optional level filter) ------------------
+        qd = not_deleted(
+            s.query(m.Interdependence)
+             .filter(m.Interdependence.interlinkage_id.in_(il_ids)),
+            m.Interdependence
+        )
+        if levels_flt:
+            qd = qd.filter(m.Interdependence.level.in_(levels_flt))
+        deps = qd.all()
+
+        # ------------------ Grouping key ------------------
+        def key_for(dep: m.Interdependence) -> str:
+            ident = dep.interdependence_identifier or ""
+            typ   = dep.type or ""
+            lvl   = dep.level or ""
+            if group_by == "identifier":
+                return ident
+            if group_by == "type":
+                return typ
+            if group_by == "id_type":
+                return f"{ident} | {typ}"
+            if group_by == "type_level":
+                return f"{typ} | {lvl}"
+            return ident
+
+        buckets = {}  # key -> { "deps": [...], "il_ids": set(), "levels": set(), "types": set(), "key": key, "by": group_by }
+        for d in deps:
+            k = key_for(d)
+            b = buckets.get(k)
+            if not b:
+                b = {"key": k, "by": group_by, "deps": [], "il_ids": set(), "levels": set(), "types": set()}
+                buckets[k] = b
+            b["deps"].append(d)
+            b["il_ids"].add(d.interlinkage_id)
+            if d.level: b["levels"].add(d.level)
+            if d.type:  b["types"].add(d.type)
+
+        # retain only clusters with at least N distinct interlinkages
+        clusters_raw = [b for b in buckets.values() if len(b["il_ids"]) >= min_cluster]
+        # sort: larger clusters first
+        clusters_raw.sort(key=lambda b: (len(b["il_ids"]), len(b["deps"])), reverse=True)
+
+        # ------------------ Pull needed ILs ------------------
+        needed_il_ids = set().union(*(c["il_ids"] for c in clusters_raw)) if clusters_raw else set()
+        il_rows = {}
+        if needed_il_ids:
+            q_ils = not_deleted(s.query(m.Interlinkage).filter(m.Interlinkage.id.in_(needed_il_ids)), m.Interlinkage)
+            for il in q_ils.all():
+                il_rows[il.id] = il
+
+        # ------------------ Optional: latest exposures per IL (for measure != none) ------------------
+        meas_map = {}
+        if measure != "none" and needed_il_ids and exposures_mode == "latest":
+            latest_sub = (
+                s.query(
+                    m.ExposureSnapshot.interlinkage_id,
+                    func.max(m.ExposureSnapshot.as_of_date).label("max_d")
+                )
+                .filter(m.ExposureSnapshot.interlinkage_id.in_(needed_il_ids))
+                .group_by(m.ExposureSnapshot.interlinkage_id)
+                .subquery()
+            )
+            snaps = (
+                s.query(m.ExposureSnapshot)
+                .join(latest_sub,
+                      and_(m.ExposureSnapshot.interlinkage_id == latest_sub.c.interlinkage_id,
+                           m.ExposureSnapshot.as_of_date     == latest_sub.c.max_d))
+                .all()
+            )
+            for r in snaps:
+                v = getattr(r, measure, None)
+                if v is not None:
+                    meas_map[r.interlinkage_id] = v
+
+        # ------------------ ENRICH: names & currency codes ------------------
+        sponsor_ids   = set()
+        counterpty_ids= set()
+        currency_ids  = set()
+        for il in il_rows.values():
+            if il.sponsor_id:      sponsor_ids.add(il.sponsor_id)
+            if il.counterparty_id: counterpty_ids.add(il.counterparty_id)
+            if il.currency_id:     currency_ids.add(il.currency_id)
+
+        name_by_entity_id = {}
+        ent_ids = sponsor_ids | counterpty_ids
+        if ent_ids:
+            for ent in not_deleted(s.query(m.LegalEntity).filter(m.LegalEntity.id.in_(ent_ids)), m.LegalEntity).all():
+                name_by_entity_id[ent.id] = ent.name or ""
+
+        code_by_ccy_id = {}
+        if currency_ids:
+            for cur in s.query(m.Currency).filter(m.Currency.id.in_(currency_ids)).all():
+                code_by_ccy_id[cur.id] = cur.code or ""
+
+        # ------------------ Build response ------------------
+        def label_for(key: str, by: str) -> str:
+            # Keep terse; FE can prettify if needed
+            return key or "—"
+
+        resp_clusters = []
+        overlay_nodes = []
+        overlay_links = []
+
+        for b in clusters_raw:
+            il_summaries = []
+            for il_id in sorted(b["il_ids"]):
+                il = il_rows.get(il_id)
+                if not il:
+                    continue
+                sv = {
+                    "id": il.id,
+                    "project_id": il.project_id,
+                    "sponsor_id": il.sponsor_id,
+                    "sponsor_name": name_by_entity_id.get(il.sponsor_id) or None,             # ENRICHED
+                    "counterparty_id": il.counterparty_id,
+                    "counterparty_name": name_by_entity_id.get(il.counterparty_id) or None,    # ENRICHED
+                    "notional_amount": (str(il.notional_amount) if il.notional_amount is not None else None),
+                    "currency_id": il.currency_id,
+                    "currency_code": code_by_ccy_id.get(il.currency_id) or None,               # ENRICHED
+                    "measure": (str(meas_map.get(il.id)) if meas_map.get(il.id) is not None else None)
+                }
+                il_summaries.append(sv)
+
+            resp_clusters.append({
+                "key": b["key"],
+                "label": label_for(b["key"], b["by"]),
+                "by": b["by"],
+                "il_count": len(b["il_ids"]),
+                "dep_count": len(b["deps"]),
+                "levels": sorted(b["levels"]),
+                "types": sorted(b["types"]),
+                "interlinkages": il_summaries
+            })
+
+            # overlay cluster bubble; size hint scales with IL count
+            overlay_nodes.append({
+                "kind": "cluster",
+                "id": f"cluster:{b['key']}",
+                "label": label_for(b["key"], b["by"]),
+                "size_hint": min(40 + len(b["il_ids"]) * 6, 120),
+                "il_count": len(b["il_ids"])
+            })
+            for il_id in b["il_ids"]:
+                overlay_links.append({
+                    "from": f"il:{il_id}",
+                    "to": f"cluster:{b['key']}",
+                    "label": "shared-dependency"
+                })
+
+        return jsonify({
+            "scope": {
+                "pov_kind": pov_kind,
+                "pov_id": pov_id,
+                "interlinkage_ids": sorted(il_ids),
+            },
+            "params": {
+                "group_by": group_by,
+                "min_cluster": min_cluster,
+                "levels": levels_flt,
+                "measure": measure,
+                "exposures_mode": exposures_mode
+            },
+            "clusters": resp_clusters,
+            "overlay": {
+                "nodes": overlay_nodes,
+                "links": overlay_links
+            }
+        }), 200
+
+
+@api_bp.post("/analysis/expiry-monitoring")
+def analysis_expiry_monitoring():
+    """
+    Expiry monitoring for a given project POV.
+
+    POST JSON
+    ---------
+    {
+      "pov_id": <int>,                            # REQUIRED (project id)
+      "window_start": "YYYY-MM-DD",               # optional, default: today
+      "window_end":   "YYYY-MM-DD",               # optional, default: today + 365
+      "buckets_days": [0, 30, 90, 180, 365],      # optional cut points (ascending)
+      "include_overdue": true,                    # optional
+      "measure": "none" | "ead" | "rwa" | "mtm" | "pnl",   # optional, default "none"
+      "exposures_mode": "latest" | "none"                 # optional, default "latest"
+    }
+
+    Response
+    --------
+    {
+      "scope": { "pov_kind": "project", "pov_id": <int>, "interlinkage_ids": [ ... ] },
+      "params": { ...echoed... },
+
+      "items": [
+        {
+          "id": <il_id>,
+          "project_id": <int|null>,
+          "sponsor_id": <int|null>,
+          "sponsor_name": <str|null>,
+          "counterparty_id": <int|null>,
+          "counterparty_name": <str|null>,
+          "currency_id": <int|null>,
+          "currency_code": <str|null>,
+          "notional_amount": <str|null>,
+
+          "maturity_date": "YYYY-MM-DD",
+          "days_to_maturity": <int>,      # negative => overdue
+          "bucket": "<Overdue | 0-30 | 31-90 | 91-180 | >180 | Outside window>",
+          "measure": <str|null>           # if requested and available
+        },
+        ...
+      ],
+
+      "buckets": [
+        {
+          "label": "Overdue" | "0-30" | "31-90" | "91-180" | ">180" | "Outside window",
+          "from_days": <int|null>,     # inclusive (relative to today)
+          "to_days": <int|null>,       # inclusive; null = open-ended
+          "count": <int>,
+          "total_notional": [
+            { "currency_code": "EUR", "amount": "1234567.89" },
+            ...
+          ]
+        },
+        ...
+      ],
+
+      "overlay": {
+        "nodes": [
+          { "kind": "bucket", "id": "bucket:Overdue", "label": "Overdue", "size_hint": 60, "count": 3 },
+          ...
+        ],
+        "links": [
+          { "from": "il:<id>", "to": "bucket:<label>", "label": "expires-in" },
+          ...
+        ]
+      }
+    }
+    """
+    body = request.get_json(force=True, silent=False) or {}
+
+    # ---- Inputs & defaults
+    pov_id = body.get("pov_id")
+    if not isinstance(pov_id, int):
+        return jsonify({"error": "invalid_args", "hint": "pov_id (int) is required"}), 400
+
+    # dates: default window [today, today+365]
+    today = date.today()
+    def _parse_d(s):
+        try:
+            return datetime.strptime(s, "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    window_start = _parse_d(body.get("window_start")) or today
+    window_end   = _parse_d(body.get("window_end")) or (today + timedelta(days=365))
+    if window_end < window_start:
+        window_start, window_end = window_end, window_start  # swap to be safe
+
+    # buckets edges (days-from-today). Example: [0, 30, 90, 180, 365]
+    buckets_days = body.get("buckets_days") or [0, 30, 90, 180, 365]
+    buckets_days = sorted({int(x) for x in buckets_days if isinstance(x, (int, float))})
+    include_overdue = bool(body.get("include_overdue", True))
+
+    measure = (body.get("measure") or "none").strip().lower()
+    if measure not in ("none", "ead", "rwa", "mtm", "pnl"):
+        return jsonify({"error": "invalid_measure"}), 400
+    exposures_mode = (body.get("exposures_mode") or "latest").strip().lower()
+    if exposures_mode not in ("latest", "none"):
+        return jsonify({"error": "invalid_exposures_mode"}), 400
+
+    def not_deleted(q, Model):
+        return q.filter(getattr(Model, "is_deleted", False) == False) if hasattr(Model, "is_deleted") else q  # noqa: E712
+
+    # Helper to get maturity of an IL, checking multiple fields if needed
+    def _get_il_maturity(il):
+        # Try commonly used field names; adjust to your schema if different.
+        if hasattr(il, "maturity_date") and il.maturity_date:
+            return il.maturity_date
+        if hasattr(il, "end_date") and il.end_date:
+            return il.end_date
+        return None
+
+    # Build bucket ranges from the cut points, relative to "today"
+    # Example with [0, 30, 90, 180, 365]:
+    #   Overdue: (< 0) if include_overdue
+    #   0-30, 31-90, 91-180, 181-365, >365
+    def _build_bucket_labels(edges):
+        labels = []
+        if include_overdue:
+            labels.append(("Overdue", None, -1))  # days <= -1
+
+        if not edges:
+            labels.append(("0+", 0, None))
+            return labels
+
+        # contiguous ranges like 0-30, 31-90, ...
+        last = edges[0]
+        labels.append((f"{last}-" + (str(edges[0]) if edges[0] == last else str(edges[0])), last, last))
+        for i in range(len(edges)):
+            if i == 0:
+                # first closed range starts at edges[0]
+                continue
+            prev = edges[i - 1]
+            cur  = edges[i]
+            # ranges are inclusive; we make them: (prev+1) .. cur
+            labels.append((f"{prev+1}-{cur}", prev + 1, cur))
+
+        # > last edge
+        labels.append((f">{edges[-1]}", edges[-1] + 1, None))
+        return labels
+
+    bucket_defs = _build_bucket_labels(buckets_days)
+
+    with session_scope() as s:
+        # --- Scope: ILs for this project
+        q_il = not_deleted(s.query(m.Interlinkage).filter(m.Interlinkage.project_id == pov_id), m.Interlinkage)
+        ils_all = q_il.all()
+        if not ils_all:
+            return jsonify({
+                "scope": {"pov_kind": "project", "pov_id": pov_id, "interlinkage_ids": []},
+                "params": {
+                    "window_start": window_start.isoformat(),
+                    "window_end": window_end.isoformat(),
+                    "buckets_days": buckets_days,
+                    "include_overdue": include_overdue,
+                    "measure": measure,
+                    "exposures_mode": exposures_mode
+                },
+                "items": [],
+                "buckets": [],
+                "overlay": {"nodes": [], "links": []}
+            }), 200
+
+        # Filter to ILs that actually have a maturity date & within (or around) the window
+        # We still collect those outside window to place them in ">max" or "Outside window"
+        # but we’ll primarily show buckets for the bounded ranges and overdue.
+        il_by_id = {}
+        maturity_map = {}   # il_id -> maturity_date
+        for il in ils_all:
+            mat = _get_il_maturity(il)
+            if not mat:
+                continue  # skip ILs with no maturity
+            il_by_id[il.id] = il
+            maturity_map[il.id] = mat
+
+        if not il_by_id:
+            return jsonify({
+                "scope": {"pov_kind": "project", "pov_id": pov_id, "interlinkage_ids": []},
+                "params": {
+                    "window_start": window_start.isoformat(),
+                    "window_end": window_end.isoformat(),
+                    "buckets_days": buckets_days,
+                    "include_overdue": include_overdue,
+                    "measure": measure,
+                    "exposures_mode": exposures_mode
+                },
+                "items": [],
+                "buckets": [],
+                "overlay": {"nodes": [], "links": []}
+            }), 200
+
+        # ---- Optional: latest exposures per IL
+        meas_map = {}
+        if measure != "none" and maturity_map and exposures_mode == "latest":
+            latest_sub = (
+                s.query(
+                    m.ExposureSnapshot.interlinkage_id,
+                    func.max(m.ExposureSnapshot.as_of_date).label("max_d")
+                )
+                .filter(m.ExposureSnapshot.interlinkage_id.in_(list(maturity_map.keys())))
+                .group_by(m.ExposureSnapshot.interlinkage_id)
+                .subquery()
+            )
+            snaps = (
+                s.query(m.ExposureSnapshot)
+                .join(latest_sub,
+                      and_(m.ExposureSnapshot.interlinkage_id == latest_sub.c.interlinkage_id,
+                           m.ExposureSnapshot.as_of_date     == latest_sub.c.max_d))
+                .all()
+            )
+            for r in snaps:
+                v = getattr(r, measure, None)
+                if v is not None:
+                    meas_map[r.interlinkage_id] = v
+
+        # ---- Enrich: names/currencies
+        sponsor_ids, cpty_ids, ccy_ids = set(), set(), set()
+        for il in il_by_id.values():
+            if il.sponsor_id:      sponsor_ids.add(il.sponsor_id)
+            if il.counterparty_id: cpty_ids.add(il.counterparty_id)
+            if il.currency_id:     ccy_ids.add(il.currency_id)
+
+        name_by_entity = {}
+        ent_ids = sponsor_ids | cpty_ids
+        if ent_ids:
+            ents = not_deleted(s.query(m.LegalEntity).filter(m.LegalEntity.id.in_(ent_ids)), m.LegalEntity).all()
+            for e in ents:
+                name_by_entity[e.id] = e.name or ""
+
+        code_by_ccy = {}
+        if ccy_ids:
+            for c in s.query(m.Currency).filter(m.Currency.id.in_(ccy_ids)).all():
+                code_by_ccy[c.id] = c.code or ""
+
+        # ---- Build items & bucket assignment
+        def _bucket_of(days):
+            # days relative to today (negative => overdue)
+            if include_overdue and days < 0:
+                return "Overdue"
+            # walk defined ranges
+            for label, lo, hi in bucket_defs:
+                if label == "Overdue":
+                    continue
+                if lo is not None and hi is not None and lo <= days <= hi:
+                    return label
+                if lo is not None and hi is None and days >= lo:
+                    return label
+            return "Outside window"
+
+        items = []
+        for il_id, il in il_by_id.items():
+            mat = maturity_map[il_id]
+            days_to = (mat - today).days
+            bucket = _bucket_of(days_to)
+
+            entry = {
+                "id": il.id,
+                "project_id": il.project_id,
+                "sponsor_id": il.sponsor_id,
+                "sponsor_name": name_by_entity.get(il.sponsor_id) or None,
+                "counterparty_id": il.counterparty_id,
+                "counterparty_name": name_by_entity.get(il.counterparty_id) or None,
+                "currency_id": il.currency_id,
+                "currency_code": code_by_ccy.get(il.currency_id) or None,
+                "notional_amount": (str(il.notional_amount) if il.notional_amount is not None else None),
+                "maturity_date": mat.isoformat(),
+                "days_to_maturity": days_to,
+                "bucket": bucket,
+                "measure": (str(meas_map.get(il.id)) if meas_map.get(il.id) is not None else None)
+            }
+            items.append(entry)
+
+        # ---- Aggregate per bucket (count + total notional per currency)
+        from collections import defaultdict
+        bucket_counts = defaultdict(int)
+        bucket_totals = defaultdict(lambda: defaultdict(float))  # bucket -> ccy_code -> total
+
+        def _as_float(x):
+            try:
+                return float(x)
+            except Exception:
+                return 0.0
+
+        for it in items:
+            b = it["bucket"]
+            bucket_counts[b] += 1
+            amt = _as_float(it["notional_amount"])
+            ccy = it["currency_code"] or "—"
+            bucket_totals[b][ccy] += amt
+
+        # Bake bucket rows in a stable order:
+        ordered_bucket_labels = [lbl for (lbl, _, _) in bucket_defs]
+        if include_overdue and "Overdue" not in ordered_bucket_labels:
+            ordered_bucket_labels = ["Overdue"] + ordered_bucket_labels
+        # Also include "Outside window" if any
+        if any(it["bucket"] == "Outside window" for it in items):
+            ordered_bucket_labels.append("Outside window")
+
+        buckets_resp = []
+        for lbl in ordered_bucket_labels:
+            # find bounds
+            from_days, to_days = None, None
+            for (bl, lo, hi) in bucket_defs:
+                if bl == lbl:
+                    from_days, to_days = lo, hi
+                    break
+            if lbl == "Overdue":
+                from_days, to_days = None, -1
+            if lbl == "Outside window":
+                from_days, to_days = None, None
+
+            totals = [
+                {"currency_code": ccy, "amount": f"{amt:.2f}"}
+                for ccy, amt in sorted(bucket_totals[lbl].items())
+            ]
+            buckets_resp.append({
+                "label": lbl,
+                "from_days": from_days,
+                "to_days": to_days,
+                "count": bucket_counts[lbl],
+                "total_notional": totals
+            })
+
+        # ---- Overlay for simple graphing: bucket nodes + IL->bucket links
+        overlay_nodes, overlay_links = [], []
+        for b in buckets_resp:
+            # skip empty buckets to reduce clutter
+            if b["count"] <= 0:
+                continue
+            size_hint = min(40 + b["count"] * 6, 120)
+            overlay_nodes.append({
+                "kind": "bucket",
+                "id": f"bucket:{b['label']}",
+                "label": b["label"],
+                "size_hint": size_hint,
+                "count": b["count"]
+            })
+        for it in items:
+            if it["bucket"] == "Outside window":
+                continue
+            overlay_links.append({
+                "from": f"il:{it['id']}",
+                "to": f"bucket:{it['bucket']}",
+                "label": "expires-in"
+            })
+
+        return jsonify({
+            "scope": {
+                "pov_kind": "project",
+                "pov_id": pov_id,
+                "interlinkage_ids": sorted(list(il_by_id.keys()))
+            },
+            "params": {
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+                "buckets_days": buckets_days,
+                "include_overdue": include_overdue,
+                "measure": measure,
+                "exposures_mode": exposures_mode
+            },
+            "items": items,
+            "buckets": buckets_resp,
+            "overlay": {
+                "nodes": overlay_nodes,
+                "links": overlay_links
+            }
+        }), 200

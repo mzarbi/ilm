@@ -1,7 +1,7 @@
 <template>
   <v-container fluid class="py-4">
     <v-row class="mb-3" align="center" no-gutters>
-      <v-col cols="12" md="8">
+      <v-col cols="12" md="12">
         <v-card rounded="xl" class="pa-3 d-flex align-center flex-wrap" elevation="2" style="gap:8px;">
           <!-- Mode -->
           <v-btn-toggle v-model="mode" rounded="xl" density="comfortable" divided>
@@ -16,12 +16,12 @@
             :items="selectItems"
             :loading="selectLoading"
             :label="selectLabel"
-            density="comfortable"
-            variant="solo"
-            class="flex-grow-1 inline-select"
             clearable
             item-title="text"
             item-value="value"
+            density="comfortable"
+            variant="solo"
+            class="flex-grow-1 inline-select"
             hide-details
           >
             <template #append-item>
@@ -48,7 +48,7 @@
         </v-card>
       </v-col>
 
-      <v-col cols="12" md="4">
+      <v-col cols="12" md="4" v-if="1==0">
         <v-card rounded="xl" class="pa-3" elevation="2">
           <!-- Contextual toggles -->
           <template v-if="mode==='project'">
@@ -155,12 +155,177 @@
             </template>
           </div>
         </v-card>
+
+        <v-card rounded="xl" elevation="3" class="pa-0 mt-4">
+          <v-toolbar density="comfortable" color="blue-grey-lighten-5">
+            <v-toolbar-title class="text-subtitle-1 font-weight-bold">Analysis</v-toolbar-title>
+            <v-spacer/>
+            <v-select
+              density="comfortable"
+              variant="solo"
+              class="flex-grow-1 inline-select"
+              hide-details
+
+              v-model="analysisKey"
+              :items="analysisOptions"
+              :disabled="!focusId || analysisOptions.length===0"
+              item-title="text"
+              item-value="value"
+              :label="!focusId ? 'Pick a focus first' : ''"
+            />
+            <v-btn
+              icon="mdi-help-circle-outline"
+              variant="text"
+              :disabled="analysisOptions.length===0"
+              @click="helpOpen = true"
+            />
+          </v-toolbar>
+
+          <div class="pa-4">
+            <template v-if="!focusId">
+              <div class="text-medium-emphasis d-flex align-center">
+                <v-icon class="mr-2">mdi-information-outline</v-icon>
+                Pick a Project / Legal entity / Interlinkage first.
+              </div>
+            </template>
+
+            <template v-else-if="!analysisKey">
+              <div class="text-medium-emphasis d-flex align-center">
+                <v-icon class="mr-2">mdi-chart-bell-curve</v-icon>
+                Choose an analysis case from the selector.
+              </div>
+            </template>
+
+            <template v-else>
+              <div class="d-flex align-center mb-2" style="gap:8px;">
+                <div class="text-subtitle-1 font-weight-bold">{{ selectedAnalysis?.title }}</div>
+                <v-chip density="comfortable" label color="blue-grey-lighten-4" class="ml-1">
+                  POV: {{ povLabel }}
+                </v-chip>
+              </div>
+              <div class="text-body-2 mb-3">{{ selectedAnalysis?.short }}</div>
+
+              <!-- Optional inputs per analysis (stub, adapt later) -->
+              <div v-if="selectedAnalysis">
+                <template v-if="selectedAnalysis.key === 'project_concentration_by_dependency'">
+                  <div class="d-flex align-center flex-wrap" style="gap:8px;">
+                    <v-select
+                      v-model="analysisParams.groupBy"
+                      :items="[
+                        { title:'Identifier', value:'identifier' },
+                        { title:'Type', value:'type' },
+                        { title:'Identifier + Type', value:'id_type' },
+                        { title:'Type + Level', value:'type_level' }
+                      ]"
+                      label="Group by"
+                      density="comfortable"
+                      style="min-width: 200px"
+                      hide-details
+                    />
+                    <v-text-field
+                      v-model.number="analysisParams.minCluster"
+                      type="number"
+                      min="2"
+                      label="Min cluster size"
+                      density="comfortable"
+                      style="max-width: 180px"
+                      hide-details
+                    />
+                    <v-select
+                      v-model="analysisParams.levels"
+                      :items="['low','medium','high','critical']"
+                      label="Level filter (optional)"
+                      multiple chips clearable
+                      density="comfortable"
+                      style="min-width: 260px"
+                      hide-details
+                    />
+                  </div>
+                </template>
+
+                <!-- Keep generic dateRange for other cases -->
+                <div v-else-if="selectedAnalysis?.needs?.dateRange" class="d-flex align-center flex-wrap" style="gap:8px;">
+                  <v-text-field v-model="analysisParams.from" label="From (YYYY-MM-DD)" density="comfortable" style="max-width: 180px;" hide-details />
+                  <v-text-field v-model="analysisParams.to" label="To (YYYY-MM-DD)" density="comfortable" style="max-width: 180px;" hide-details />
+                </div>
+              </div>
+
+              <div class="d-flex align-center mt-3" style="gap:8px;">
+                <v-btn color="primary" prepend-icon="mdi-play" :loading="analysisLoading" @click="runAnalysis">
+                  Run
+                </v-btn>
+                <v-btn variant="text" prepend-icon="mdi-text-box-search-outline" @click="helpOpen = true">
+                  Learn more
+                </v-btn>
+              </div>
+
+              <!-- Result placeholder -->
+              <div class="mt-4">
+                <div v-if="analysisResult" class="text-body-2">
+                  <div class="text-medium-emphasis mb-1">Result</div>
+                  <pre class="analysis-pre">{{ JSON.stringify(analysisResult, null, 2) }}</pre>
+                </div>
+                <div v-else class="text-medium-emphasis">
+                  The output will appear here after running the analysis.
+                </div>
+              </div>
+            </template>
+          </div>
+        </v-card>
+
+        <!-- Help dialog -->
+        <v-dialog v-model="helpOpen" max-width="780">
+  <v-card>
+    <v-card-title class="d-flex align-center">
+      <v-icon class="mr-2">mdi-help-circle-outline</v-icon>
+      Analysis catalog — {{ povLabel }}
+      <v-spacer/>
+      <v-btn icon="mdi-close" variant="text" @click="helpOpen=false"/>
+    </v-card-title>
+    <v-divider/>
+    <v-card-text style="max-height: 70vh; overflow:auto;">
+      <div v-if="analysisOptions.length===0" class="text-medium-emphasis">
+        No analysis cases available for this POV.
+      </div>
+      <div v-else class="d-flex flex-column" style="gap:16px;">
+        <div v-for="opt in analysisOptions" :key="opt.value" class="help-block">
+          <div class="text-subtitle-2 font-weight-bold">{{ opt.text }}</div>
+          <div class="text-caption mb-2">POV: {{ opt.pov.join(', ') }}</div>
+          <div class="text-body-2">{{ opt.long }}</div>
+        </div>
+      </div>
+    </v-card-text>
+    <v-divider/>
+    <v-card-actions>
+      <v-spacer/>
+      <v-btn color="primary" variant="tonal" @click="helpOpen=false">Close</v-btn>
+    </v-card-actions>
+  </v-card>
+</v-dialog>
       </v-col>
     </v-row>
   </v-container>
+
+  <ConcentrationOnSharedDependencies
+
+    v-model:open="concentrationOnSharedDependenciesAnalysisDialogOpen"
+    :title="concentrationOnSharedDependenciesAnalysisDialogTitle"
+    :payload="concentrationOnSharedDependenciesAnalysisDialogPayload"
+    :context="concentrationOnSharedDependenciesAnalysisDialogContext"
+  />
+
+  <ExpiryMonitoring
+    v-model:open="expiryMonitoringDialogOpen"
+    :title="expiryMonitoringDialogTitle"
+    :payload="expiryMonitoringDialogPayload"
+    :context="expiryMonitoringDialogContext"
+  />
 </template>
 
 <script setup>
+import ConcentrationOnSharedDependencies from '@/views/ConcentrationOnSharedDependencies.vue'
+import ExpiryMonitoring from '@/views/ExpiryMonitoring.vue'
+
 import { ref, computed, onMounted, watch, reactive, defineComponent } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '@/composables/useApi'
@@ -170,10 +335,272 @@ import * as joint from 'jointjs'
 import 'jointjs/dist/joint.css'
 import dagre from 'dagre'
 import { AdaptiveCardModel } from '@/graph/adaptive-card';
+import { shapesNS } from '@/graph/adaptive-card'
 const { dia } = joint;
 
 const { fetchFocusBundle } = useFocusBundle()
 
+/*************** ANALYSIS ***********************/
+
+const concentrationOnSharedDependenciesAnalysisDialogOpen = ref(false)
+const concentrationOnSharedDependenciesAnalysisDialogTitle = ref('Analysis')
+const concentrationOnSharedDependenciesAnalysisDialogPayload = ref(null)
+
+const expiryMonitoringDialogOpen = ref(false)
+const expiryMonitoringDialogTitle = ref('Expiry monitoring')
+const expiryMonitoringDialogPayload = ref(null)
+
+// Context used by the dialog to resolve labels (you already build these in cache/refCache)
+const expiryMonitoringDialogContext = ref({
+  interlinkages: {},  // by id (optional here)
+  entities: {},       // by id
+  currencies: {},     // by id
+})
+
+function iso(d) {
+  // Accepts Date | string | null ; returns 'YYYY-MM-DD'
+  if (!d) return null
+  const dt = (d instanceof Date) ? d : new Date(d)
+  const y = dt.getFullYear()
+  const m = String(dt.getMonth() + 1).padStart(2, '0')
+  const day = String(dt.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+async function runExpiryMonitoring(payload) {
+  return await postJSON('/api/analysis/expiry-monitoring', payload)
+}
+
+
+const concentrationOnSharedDependenciesAnalysisDialogContext = ref({
+  interlinkages: {},  // by id
+  entities: {},       // by id
+  currencies: {},     // by id
+})
+
+async function postJSON(url, payload) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return await res.json()
+}
+async function runConcentrationOnSharedDeps(payload) {
+  return await postJSON('/api/analysis/concentration/shared-dependencies', payload)
+}
+
+const ANALYSIS_CASES = [
+  // -------- Project-centric --------
+  {
+    key: 'project_dashboard',
+    pov: ['project'],
+    title: 'Project interconnection dashboard',
+    short: 'All interlinkages & interdependences tied to this project, with type/level distribution.',
+    long: 'Build a full view of the selected project: list interlinkages, entities involved, and all interdependences. Show counts by type/level, identify critical dependencies, and spotlight expiries within N days.',
+  },
+  {
+    key: 'project_concentration_by_dependency',
+    pov: ['project','interlinkage'],
+    title: 'Concentration on shared dependencies',
+    short: 'Find clusters of deals relying on the same dependency (e.g., vendor, guarantee).',
+    long: 'Group interlinkages within the project by interdependence_identifier/type. Aggregate exposure (EAD/RWA) to reveal single points of failure and correlated risk.',
+  },
+  {
+    key: 'project_expiry_monitoring',
+    pov: ['project','interlinkage'],
+    title: 'Expiry monitoring',
+    short: 'Upcoming expiry of guarantees/contractual/technical interdependences.',
+    long: 'Filter dependencies by expiry within a look-ahead window to surface renewal actions and owners.',
+    needs: { dateRange: true }
+  },
+
+  // -------- Entity-centric --------
+  {
+    key: 'entity_connected_clients',
+    pov: ['entity','interlinkage'],
+    title: 'Group of connected clients',
+    short: 'Aggregate exposures across entities linked by ownership/guarantee/control.',
+    long: 'Form regulatory “connected client” groups using interdependences. Sum EAD/RWA across the group and compare to internal/regulatory thresholds.',
+  },
+  {
+    key: 'entity_guarantee_network',
+    pov: ['entity','interlinkage'],
+    title: 'Cross-guarantee network',
+    short: 'Detect meshes/loops in guarantees and rank entities by systemic impact.',
+    long: 'Filter type=guarantee; compute cycles and centrality to identify structural weaknesses or circular support patterns.',
+  },
+  {
+    key: 'entity_sanction_propagation',
+    pov: ['entity'],
+    title: 'Sanction/PEP propagation',
+    short: 'Trace indirect exposure from sanctioned/PEP entities via dependency paths.',
+    long: 'Starting from a flagged entity, traverse ownership/governance links to discover indirect exposure. Rank by cumulative EAD affected.',
+  },
+
+  // -------- Interlinkage-centric --------
+  {
+    key: 'il_risk_profile',
+    pov: ['interlinkage'],
+    title: 'Deal risk profile (edge-aware)',
+    short: 'List active interdependences (type/level/dates) with risk notes for this deal.',
+    long: 'Snapshot the deal’s dependency surface: guarantees, ownership, contractual, and technical edges. Show materiality (level) and effective/expiry windows.',
+  },
+  {
+    key: 'il_contagion',
+    pov: ['interlinkage','entity'],
+    title: 'Contagion from this deal',
+    short: 'If this deal is impacted, which others are at risk via shared dependencies?',
+    long: 'For every interdependence on this deal, find other interlinkages sharing the same dependency identifier or type. Summarize impacted count and exposures.',
+  },
+  {
+    key: 'il_vs_exposure_trend',
+    pov: ['interlinkage'],
+    title: 'Exposure trend vs dependency level',
+    short: 'Overlay EAD/MTM time series with dependency materiality.',
+    long: 'Correlate changes in EAD/MTM with presence of high/critical dependencies over time to detect sensitivity.',
+    needs: { dateRange: true }
+  },
+
+  // -------- Multi-POV utilities --------
+  {
+    key: 'concentration_heatmap',
+    pov: ['project','entity','interlinkage'],
+    title: 'Concentration heatmap',
+    short: 'Counts & EAD by dependency type×level, sector, and country.',
+    long: 'Aggregate dependency counts and exposures to build heatmaps for portfolio slices: type×level, sector×country. Great as a starting KPI board.',
+  },
+  {
+    key: 'operational_resilience_register',
+    pov: ['project','entity','interlinkage'],
+    title: 'Operational resilience register',
+    short: 'Inventory of critical dependencies with owners and renewal actions.',
+    long: 'Keep an actionable list of active critical interdependences (level=critical), assign owners, and drive renewals or mitigations.',
+  },
+]
+
+/* ---------- Reactive state for Analysis ---------- */
+const helpOpen = ref(false)
+const analysisKey = ref(null)
+const analysisLoading = ref(false)
+const analysisResult = ref(null)
+const analysisParams = reactive({ from: null, to: null })
+
+analysisParams.groupBy   = analysisParams.groupBy   ?? 'identifier'
+analysisParams.minCluster= analysisParams.minCluster?? 2
+analysisParams.levels    = analysisParams.levels    ?? []
+
+/* Filter catalog by current POV (mode) */
+const analysisOptions = computed(() => {
+  const pov = mode.value // 'project' | 'entity' | 'interlinkage'
+  return ANALYSIS_CASES
+    .filter(c => c.pov.includes(pov))
+    .map(c => ({
+      text: c.title,
+      value: c.key,
+      pov: c.pov,
+      long: c.long,
+      short: c.short,
+    }))
+})
+
+const selectedAnalysis = computed(() => ANALYSIS_CASES.find(c => c.key === analysisKey.value) || null)
+const povLabel = computed(() => {
+  if (mode.value === 'project') return 'Project'
+  if (mode.value === 'entity') return 'Legal entity'
+  return 'Interlinkage'
+})
+
+/* Run hook (stub calling your existing focus bundle / specific endpoints later) */
+async function runAnalysis() {
+  if (!selectedAnalysis.value || !focusId.value) {
+    notify.warn('Pick a focus and an analysis first.')
+    return
+  }
+  analysisLoading.value = true
+  analysisResult.value = null
+  try {
+    const caseKey = selectedAnalysis.value.key
+
+    if (caseKey === 'project_expiry_monitoring') {
+      // Defaults if user did not set the optional date range
+      const today = new Date()
+      const defaultFrom = iso(today)
+      const defaultTo = iso(new Date(today.getFullYear(), today.getMonth(), today.getDate() + 90))
+
+      const payload = {
+        pov_kind: mode.value,                // 'project' | 'interlinkage' also supported
+        pov_id: Number(focusId.value),
+        from: iso(analysisParams.from) || defaultFrom,
+        to:   iso(analysisParams.to)   || defaultTo,
+        // Optional: filter by dependency types/levels if you add UI fields later:
+        // dep_types: ['guarantee','contractual','technical'],
+        // levels: ['low','medium','high','critical']
+      }
+
+      const data = await runExpiryMonitoring(payload)
+      analysisResult.value = data // keep raw JSON in the right pane if you like
+
+      // Provide context maps so the dialog can show nice labels/colors
+      expiryMonitoringDialogTitle.value = `Expiry monitoring — ${povLabel.value}`
+      expiryMonitoringDialogPayload.value = data
+      expiryMonitoringDialogContext.value = {
+        entities: { ...cache.entities },           // by id
+        currencies: { ...refCache.currenciesById } // by id
+        // interlinkages can be added if you plan to resolve more fields
+      }
+      expiryMonitoringDialogOpen.value = true
+
+      const n = data?.items?.length ?? 0
+      notify.success(`Expiry monitoring: ${n} item${n === 1 ? '' : 's'} found.`)
+      return
+    }
+    if (caseKey === 'project_concentration_by_dependency') {
+      const payload = {
+        pov_kind: mode.value,                      // 'project' | 'entity' | 'interlinkage'
+        pov_id: Number(focusId.value),
+        group_by: analysisParams.groupBy || 'identifier',
+        min_cluster: Number(analysisParams.minCluster || 2),
+        levels: Array.isArray(analysisParams.levels) ? analysisParams.levels : [],
+        measure: 'none',                           // 'ead'|'rwa'|'mtm'|'pnl' when you want scoring
+        exposures_mode: 'latest'
+      }
+
+      const data = await runConcentrationOnSharedDeps(payload)
+      analysisResult.value = data                   // keep if you want to show raw JSON somewhere
+
+      // 👉 Show in the dialog (separate JointJS paper)
+      concentrationOnSharedDependenciesAnalysisDialogTitle.value = 'Concentration on shared dependencies'
+      concentrationOnSharedDependenciesAnalysisDialogPayload.value = data
+      concentrationOnSharedDependenciesAnalysisDialogContext.value = {
+        interlinkages: { ...cache.interlinkages },
+        entities: { ...cache.entities },
+        currencies: { ...refCache.currenciesById }
+      }
+      concentrationOnSharedDependenciesAnalysisDialogOpen.value = true
+
+      const n = data?.clusters?.length ?? 0
+      notify.success(`Concentration: ${n} cluster${n === 1 ? '' : 's'} found.`)
+      return
+    }
+
+    // other cases unchanged / stub
+    analysisResult.value = {
+      ok: true,
+      message: 'Analysis executed (stub). Plug backend here.',
+      pov: mode.value,
+      focusId: Number(focusId.value),
+      case: caseKey,
+      params: { ...analysisParams }
+    }
+  } catch (e) {
+    console.error('runAnalysis error', e)
+    notify.error('Analysis failed')
+  } finally {
+    analysisLoading.value = false
+  }
+}
 
 
 
@@ -182,11 +609,97 @@ const paperEl = ref(null)
 let paper
 
 const filters = reactive({ level: null, type: null })
-var graph = reactive({ nodes: [], links: [] })
+//var graph = reactive({ nodes: [], links: [] })
+let graph = null
 const selected = ref(null)
 const focusId = ref(null)
 const loading = ref(false)
 
+
+// Track analysis overlay cells by a tag
+const OVERLAY_TAG = 'analysis:concentration'
+function clearAnalysisOverlay(tag = OVERLAY_TAG) {
+  if (!graph) return
+  const cells = graph.getCells()
+  const toRemove = cells.filter(c => c.get?.('overlayTag') === tag)
+  if (toRemove.length) graph.removeCells(toRemove)
+}
+
+// A compact “cluster bubble” node
+function makeClusterBubble(node, { tag = OVERLAY_TAG } = {}) {
+  const r = new joint.shapes.standard.Circle()
+  const size = Math.max(40, Math.min(Number(node.size_hint || 60), 120))
+  r.resize(size, size)
+  r.attr({
+    body: { fill: '#FFF8E1', stroke: '#FF6F00' },
+    label: {
+      text: String(node.label ?? 'Cluster'),
+      fontSize: 11,
+      fontWeight: 600,
+      fill: '#E65100',
+      wrap: { text: true, width: size - 10 }
+    }
+  })
+  r.set('typeTag', 'cluster')
+  r.set('overlayTag', tag)
+  r.set('data', { id: node.id, il_count: node.il_count })
+  r.addTo(graph)
+  return r
+}
+
+// Draw overlay from backend plan: { nodes:[], links:[] }
+function drawOverlayFromPlan(overlay, { tag = OVERLAY_TAG } = {}) {
+  if (!overlay) return
+  const nodeMap = new Map()
+
+  // Reuse existing IL nodes; create cluster bubbles
+  overlay.nodes?.forEach(n => {
+    if (String(n.kind) === 'cluster') {
+      const cell = makeClusterBubble(n, { tag })
+      nodeMap.set(n.id, cell)
+    } else {
+      // other kinds can be added later
+    }
+  })
+
+  // Build links (IL -> cluster). IL nodes already exist in graph.
+  overlay.links?.forEach(l => {
+    const srcId = String(l.from || '')
+    const tgtId = String(l.to || '')
+    let srcCell = null
+    let tgtCell = null
+
+    // If source is an IL reference ("il:<id>"), reuse the existing IL cell
+    if (srcId.startsWith('il:')) {
+      const ilRawId = srcId.slice(3)
+      srcCell = graph.getCell(`interlinkage-${ilRawId}`) // your IL cell id format
+    } else {
+      srcCell = nodeMap.get(srcId)
+    }
+
+    // Target is usually "cluster:<key>"
+    tgtCell = nodeMap.get(tgtId)
+
+    if (srcCell && tgtCell) {
+      const link = new joint.shapes.standard.Link()
+      link.source(srcCell)
+      link.target(tgtCell)
+      link.attr({
+        line: {
+          stroke: '#FF6F00',
+          strokeWidth: 1.8,
+          strokeDasharray: '5 3',
+          targetMarker: { type: 'classic', stroke: '#FF6F00', fill: '#FF6F00' }
+        }
+      })
+      if (l.label) link.appendLabel({ position: 0.5, attrs: { text: { text: String(l.label), fontSize: 10 } } })
+      link.set('typeTag', 'analysis-link')
+      link.set('overlayTag', tag)
+      link.set('data', l)
+      link.addTo(graph)
+    }
+  })
+}
 
 function downloadGraphSvg() {
   if (!paper) return
@@ -317,7 +830,7 @@ function initPaper() {
   if (paper) { try { paper.remove() } catch(_){} paper = null }
   if (paperEl.value) paperEl.value.innerHTML = ''
 
-  graph = new joint.dia.Graph()
+  graph = new joint.dia.Graph({}, { cellNamespace: shapesNS })
 
   paper = new joint.dia.Paper({
     el: paperEl.value,
@@ -328,7 +841,7 @@ function initPaper() {
     drawGrid: true,
     background: { color: '#FAFAFA' },
     interactive: { linkMove: false },
-    cellViewNamespace: joint.shapes
+    cellViewNamespace: shapesNS
   })
 
   // basic pan/zoom
@@ -693,17 +1206,178 @@ function makeInterlinkageCell(il) {
 }
 
 
+// ==== Helpers (reuse alongside statusToCardStyle) ====
+function safe(v) { return (v == null || v === '') ? '—' : String(v) }
+
+function levelToCardStyle(level) {
+  const s = (level || '').toLowerCase()
+  if (s === 'critical') return 'attention'
+  if (s === 'high')     return 'warning'
+  if (s === 'medium')   return 'accent'
+  if (s === 'low')      return 'good'
+  return 'default'
+}
+
+function fmtDate(d) {
+  try {
+    if (!d) return '—'
+    // Expecting ISO (YYYY-MM-DD) from API; keep it locale-friendly but short
+    return new Date(d).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' })
+  } catch { return String(d) || '—' }
+}
+
+// ==== Adaptive Card template for Interdependence ====
+function interdependenceCardTemplate(dep) {
+  // Resolve project name if normalized
+  const projName = dep.project?.name || refCache.projectsById[dep.project_id]?.name || dep.project_name || '—'
+
+  return {
+    type: 'AdaptiveCard',
+    $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
+    version: '1.5',
+    body: [
+      // Header bar driven by LEVEL (materiality)
+      {
+        type: 'Container',
+        style: 'good',
+        bleed: true,
+        items: [
+          {
+            type: 'ColumnSet',
+            columns: [
+              {
+                type: 'Column',
+                width: 'stretch',
+                items: [
+                  {
+                    type: 'TextBlock',
+                    text: 'Interdependence : ' + safe(dep.type),
+                    weight: 'Bolder',
+                    size: 'Medium',
+                    wrap: true
+                  },
+                  {
+                    type: 'TextBlock',
+                    spacing: 'None',
+                    text: `Level: ${safe(dep.level)}`,
+                    isSubtle: true,
+                    size: 'Small',
+                    wrap: true
+                  }
+                ]
+              },
+              // Chevron to toggle details
+              {
+                type: 'Column',
+                width: 'auto',
+                verticalContentAlignment: 'Center',
+                items: [
+                  {
+                    type: 'Image',
+                    id: 'dep-chev-down',
+                    url: 'https://adaptivecards.io/content/down.png',
+                    altText: 'Show details',
+                    selectAction: {
+                      type: 'Action.ToggleVisibility',
+                      targetElements: ['dep-details','dep-chev-down','dep-chev-up']
+                    },
+                    spacing: 'None',
+                    size: 'Small'
+                  },
+                  {
+                    type: 'Image',
+                    id: 'dep-chev-up',
+                    isVisible: false,
+                    url: 'https://adaptivecards.io/content/up.png',
+                    altText: 'Hide details',
+                    selectAction: {
+                      type: 'Action.ToggleVisibility',
+                      targetElements: ['dep-details','dep-chev-down','dep-chev-up']
+                    },
+                    spacing: 'None',
+                    size: 'Small'
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+
+      // Compact KPIs row
+      {
+        type: 'Container',
+        separator: true,
+        spacing: 'Small',
+        items: [
+          {
+            type: 'ColumnSet',
+            columns: [
+              {
+                type: 'Column',
+                width: 'stretch',
+                items: [
+                  { type: 'TextBlock', text: 'Identifier', isSubtle: true, size: 'Small' },
+                  { type: 'TextBlock', text: safe(dep.interdependence_identifier), weight: 'Bolder', size: 'Small', wrap: true }
+                ]
+              },
+              {
+                type: 'Column',
+                width: 'auto',
+                items: [
+                  { type: 'TextBlock', text: 'Effective', isSubtle: true, size: 'Small' },
+                  { type: 'TextBlock', text: fmtDate(dep.effective_date), weight: 'Bolder', size: 'Small' }
+                ]
+              },
+              {
+                type: 'Column',
+                width: 'auto',
+                items: [
+                  { type: 'TextBlock', text: 'Expiry', isSubtle: true, size: 'Small' },
+                  { type: 'TextBlock', text: fmtDate(dep.expiry_date), weight: 'Bolder', size: 'Small' }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+
+      // Collapsible details
+      {
+        type: 'Container',
+        id: 'dep-details',
+        isVisible: false,
+        separator: true,
+        spacing: 'Small',
+        items: [
+          {
+            type: 'FactSet',
+            facts: [
+              { title: 'Project',         value: safe(projName) },
+              { title: 'Type',            value: safe(dep.type) },
+              { title: 'Level',           value: safe(dep.level) },
+              { title: 'Risk assessment', value: safe(dep.risk_assessment || 'No notes.') }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+
+// ==== Cell factory (AdaptiveCardModel) ====
 function makeInterdepCell(dep) {
-  const node = new joint.shapes.standard.Ellipse()
-  node.resize(140, 60)
-  node.attr({
-    body: { fill: '#F3E5F5', stroke: '#6A1B9A' },
-    label: { text: `${dep.type || 'interdep'}\n${dep.level || ''}`.trim(), fontSize: 11, fontWeight: 600, fill: '#4A148C' }
+  const cell = new AdaptiveCardModel({
+    id: `interdep-${dep.id || dep.interdependence_identifier || crypto.randomUUID?.() || Math.random().toString(36).slice(2)}`,
+    size: { width: 280, height: 92 }, // compact; expands when toggled
+    template: interdependenceCardTemplate(dep)
   })
-  node.set('typeTag', 'interdepNode')
-  node.set('data', dep)
-  node.addTo(graph)
-  return node
+  cell.set('typeTag', 'interdependence')
+  cell.set('data', dep)
+  // Optional: auto-resize after AC render if your AdaptiveCardModel supports it
+  // cell.once('ac:rendered', () => cell.fitToContent?.(8))
+  cell.addTo(graph)
+  return cell
 }
 
 function makeLink(source, target, opts = {}) {
@@ -805,7 +1479,7 @@ function buildGraphFromBundle(bundle) {
     // IL -> Interdep (solid)
     makeLink(ilNode, depNode, {
       stroke: '#6A1B9A', width: 2, label: dep.type || 'interdep',
-      typeTag: 'interdep-link-il', data: dep
+      typeTag: 'interdep-link-il', data: dep, dashed: true
     })
 
     // Interdep -> Project (dashed) : prefer dep.project_id, else IL.project_id
@@ -992,13 +1666,7 @@ async function getManyById(api, ids) {
   return rows.filter(Boolean)
 }
 
-function fmtDate(d) {
-  if (!d) return '—'
-  try {
-    const dt = typeof d === 'string' ? new Date(d) : d
-    return dt.toISOString().slice(0,10)
-  } catch { return String(d) }
-}
+
 function fmtAmount(x, ccy) {
   if (x == null) return '—'
   return new Intl.NumberFormat(undefined, { style: 'currency', currency: ccy || 'EUR', maximumFractionDigits: 2 }).format(Number(x))
@@ -1334,7 +2002,9 @@ async function applyFocus() {
     const resp   = await fetchFocusBundle(params)
     const bundle = resp && resp.data ? resp.data : resp
 
-    buildGraphFromBundle(bundle)   // <— draw directly from the bundle
+    buildGraphFromBundle(bundle)
+    clearAnalysisOverlay()
+
     selected.value = null
     notify.success('Focus data loaded.')
   } catch (e) {
@@ -1364,12 +2034,29 @@ watch([
   () => ctx.project.showEntities, () => ctx.project.showInterdeps,
   () => ctx.entity.showProjects,  () => ctx.entity.showInterdeps, () => ctx.entity.role,
   () => ctx.interlinkage.showInterdeps,
-  () => filters.level, () => filters.type
+  () => filters.level, () => filters.type,
+  () => {
+    analysisKey.value = null
+    analysisResult.value = null
+    analysisParams.from = null
+    analysisParams.to = null
+
+    clearAnalysisOverlay()
+  }
 ], () => { if (focusId.value) applyFocus() })
 
 watch(mode, () => {
   focusId.value = null
   loadSelectPage({ reset: true })
+})
+
+watch([mode, analysisKey], () => {
+  analysisResult.value = null
+  if (analysisKey.value === 'project_concentration_by_dependency') {
+    analysisParams.groupBy = 'identifier'
+    analysisParams.minCluster = 2
+    analysisParams.levels = []
+  }
 })
 
 /* ---------- Init ---------- */
@@ -1599,5 +2286,20 @@ watch([
 }
 
 .graph-paper { width: 100%; height: 700px; }
-
+.analysis-pre {
+  background: #0b1020;
+  color: #e6f0ff;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  max-height: 320px;
+  overflow: auto;
+}
+.help-block {
+  border: 1px solid #e6eaee;
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: #fff;
+}
 </style>
